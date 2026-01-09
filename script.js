@@ -339,7 +339,7 @@
 
   // original was: ema + 1.15*std + 6
   // tiny sensitivity bump: slightly lower multiplier + bias
-  const threshold = ema + 1.12 * std + 5.5;
+  const threshold = ema + 1.12 * std + 5.2;
 
   const now = performance.now();
   const canTrigger = (now - lastBeatAt) > COOLDOWN_MS;
