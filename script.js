@@ -3,6 +3,10 @@
   const ctx = canvas.getContext('2d');
   const audioEl = document.getElementById('track');
 
+  // ===== Exact switch timing =====
+  const SWITCH_AT = 16.0; // seconds
+  let hasSwitched = false; // one-time trigger when crossing 16s
+
   // ===== Layout tuning =====
   const TILE_BASE = 20;
   const GRID_SCALE = 0.8;
@@ -114,8 +118,7 @@
     return {
       seed, mode, f1, f2, f3, phase, petals, twist,
       spacing, ox1, oy1, ox2, oy2,
-      edgeWidth, tHaldi, tCream,
-      latticeMix
+      edgeWidth, tHaldi, tCream, latticeMix
     };
   }
 
@@ -124,13 +127,19 @@
       case 'Rosette Dots':
         return Math.sin(r * p.f1 + p.phase) + 0.95 * Math.cos(th * p.petals + p.phase * 0.7);
       case 'Diamond Dots':
-        return Math.sin((dx + dy) * p.f1 + p.phase) + 0.55 * Math.sin(dx * p.f2 + p.phase * 1.1) - 0.40 * Math.cos(dy * p.f3 + p.phase * 0.9);
+        return Math.sin((dx + dy) * p.f1 + p.phase)
+          + 0.55 * Math.sin(dx * p.f2 + p.phase * 1.1)
+          - 0.40 * Math.cos(dy * p.f3 + p.phase * 0.9);
       case 'Weave Dots':
-        return Math.sin(dx * p.f1 + p.phase) + Math.sin(dy * p.f2 + p.phase * 0.8) + 0.55 * Math.sin((dx - dy) * p.f3 + p.phase * 1.2);
+        return Math.sin(dx * p.f1 + p.phase)
+          + Math.sin(dy * p.f2 + p.phase * 0.8)
+          + 0.55 * Math.sin((dx - dy) * p.f3 + p.phase * 1.2);
       case 'Scallop Dots':
-        return Math.cos(dx * p.f1 + p.phase) * Math.cos(dy * p.f1 + p.phase) + 0.9 * Math.sin(r * p.f3 + p.phase * 0.6);
+        return Math.cos(dx * p.f1 + p.phase) * Math.cos(dy * p.f1 + p.phase)
+          + 0.9 * Math.sin(r * p.f3 + p.phase * 0.6);
       case 'Petal Dots':
-        return Math.cos((th + p.twist * r) * p.petals + p.phase) + 0.85 * Math.sin(r * p.f2 + p.phase * 0.4);
+        return Math.cos((th + p.twist * r) * p.petals + p.phase)
+          + 0.85 * Math.sin(r * p.f2 + p.phase * 0.4);
       default:
         return Math.sin(r * 0.2 + p.phase);
     }
@@ -174,8 +183,7 @@
   }
 
   function packedToCss(p) {
-    const s = p.toString(16).padStart(6,'0');
-    return '#' + s;
+    return '#' + p.toString(16).padStart(6,'0');
   }
 
   function setGrid(x, y, packed) {
@@ -255,31 +263,20 @@
     stampPaletteSignature(cx, cy, w, h, params);
   }
 
-  // ===== Audio (hybrid bloom → beat) =====
+  // ===== Audio + visuals =====
   let audioCtx = null;
   let analyser = null;
   let freqData = null;
   let started = false;
 
-  // Bloom/radius state
+  // Radius state
   let bloomR = 0;
   let bloomTarget = 0;
 
-  // Separate “gate” vs “visual” fullness so drops shrink radius properly
-  let gateEma = 0;
+  // Visual envelope: mostly low+mid, with slow max decay so late drops still shrink
   let vizEma = 0;
-  let gateMax = 0.08; // slow decay = stable mode switching
-  let vizMax  = 0.08; // fast decay = responsive drops
-
-  // Beat-mode gate
-  let beatMode = false;
-  let fullHighSince = 0;
-  let fullLowSince = 0;
-
-  const BEAT_MODE_ON = 0.78;
-  const BEAT_MODE_OFF = 0.55;
-  const BEAT_MODE_ON_MS = 1200;
-  const BEAT_MODE_OFF_MS = 900;
+  let vizMax = 0.08;
+  const VIZ_MAX_DECAY = 0.9995; // slower decay => better late-track drops
 
   // Beat detector (moderate)
   let prevBeatE = 0;
@@ -299,11 +296,9 @@
     const src = audioCtx.createMediaElementSource(audioEl);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.72;
-
+    analyser.smoothingTimeConstant = 0.65; // a touch more responsive
     src.connect(analyser);
     analyser.connect(audioCtx.destination);
-
     freqData = new Uint8Array(analyser.frequencyBinCount);
   }
 
@@ -322,57 +317,24 @@
   function analyzeAudio() {
     analyser.getByteFrequencyData(freqData);
 
-    // Fullness bands
+    // bands (bin ranges)
     const low  = bandAvg(0, 24);
     const mid  = bandAvg(25, 110);
     const high = bandAvg(111, 260);
 
-    // Gate uses low+mid+high (decides “full swing”)
-    const rawGate = (0.50 * low + 0.35 * mid + 0.15 * high) / 255;
+    // radius should react to drops -> ignore highs
+    const rawViz = (0.65 * low + 0.35 * mid) / 255;
 
-    // Visual uses mostly low+mid (so hats don’t keep radius huge during drops)
-    const rawViz  = (0.65 * low + 0.35 * mid) / 255;
+    vizEma += 0.10 * (rawViz - vizEma);
+    vizMax = Math.max(vizEma, vizMax * VIZ_MAX_DECAY);
 
-    // Smooth both
-    gateEma += 0.08 * (rawGate - gateEma);
-    vizEma  += 0.10 * (rawViz  - vizEma);
+    const fViz = clamp01(vizEma / Math.max(0.05, vizMax));
 
-    // Normalize with different decay rates
-    gateMax = Math.max(gateEma, gateMax * 0.995); // slow
-    vizMax  = Math.max(vizEma,  vizMax  * 0.975); // faster → drops shrink
-
-    const fGate = clamp01(gateEma / Math.max(0.06, gateMax));
-    const fViz  = clamp01(vizEma  / Math.max(0.06, vizMax));
-
-    // Beat energy: kick-ish low + a bit of snare-ish mid
+    // beat energy for pattern switching
     const midDrums = bandAvg(25, 90);
     const beatE = 0.72 * low + 0.28 * midDrums;
 
-    return { fGate, fViz, beatE };
-  }
-
-  function updateBeatMode(fGate, now) {
-    if (!beatMode) {
-      if (fGate > BEAT_MODE_ON) {
-        if (!fullHighSince) fullHighSince = now;
-        if (now - fullHighSince > BEAT_MODE_ON_MS) {
-          beatMode = true;
-          fullLowSince = 0;
-        }
-      } else {
-        fullHighSince = 0;
-      }
-    } else {
-      if (fGate < BEAT_MODE_OFF) {
-        if (!fullLowSince) fullLowSince = now;
-        if (now - fullLowSince > BEAT_MODE_OFF_MS) {
-          beatMode = false;
-          fullHighSince = 0;
-        }
-      } else {
-        fullLowSince = 0;
-      }
-    }
+    return { fViz, beatE, high };
   }
 
   function detectBeat(beatE, now) {
@@ -400,19 +362,21 @@
     bloomR = 0;
     bloomTarget = 0;
 
-    gateEma = 0;
     vizEma = 0;
-    gateMax = 0.08;
     vizMax = 0.08;
-
-    beatMode = false;
-    fullHighSince = 0;
-    fullLowSince = 0;
 
     prevBeatE = 0;
     emaBeatD = 0;
     emvBeatD = 0;
     lastBeatAt = 0;
+
+    hasSwitched = false;
+  }
+
+  // --- Generator state ---
+  function newPattern() {
+    seed = (seed + 0x9E3779B9) >>> 0;
+    rebuildPattern();
   }
 
   let rafId = null;
@@ -435,21 +399,29 @@
 
     if (started && analyser && !audioEl.paused) {
       const now = performance.now();
-      const { fGate, fViz, beatE } = analyzeAudio();
+      const { fViz, beatE } = analyzeAudio();
 
-      updateBeatMode(fGate, now);
+      // Radius ALWAYS follows the music (so late-track quiet sections shrink again)
+      const minR = 0.12 * maxR;
+      const maxRR = 1.02 * maxR;
+      bloomTarget = lerp(minR, maxRR, fViz);
 
-      if (!beatMode) {
-        // Bloom phase: radius follows music fullness (visual)
-        const minR = 0.12 * maxR;
-        const maxRR = 1.02 * maxR;
-        bloomTarget = lerp(minR, maxRR, fViz);
-      } else {
-        // Full swing: still allow drops to shrink radius, and change on beats
-        bloomTarget = maxR * (0.88 + 0.14 * fViz); // stronger drop range
-        if (detectBeat(beatE, now)) {
-          newPattern();
-        }
+      // Switch EXACTLY at 16 seconds
+      const t = audioEl.currentTime || 0;
+      const afterSwitch = t >= SWITCH_AT;
+
+      // one-time pattern flip exactly when we cross 16s
+      if (afterSwitch && !hasSwitched) {
+        hasSwitched = true;
+        newPattern();
+      }
+      if (!afterSwitch) {
+        hasSwitched = false; // if you seek back before 16s
+      }
+
+      // After 16s: change pattern on beats
+      if (afterSwitch && detectBeat(beatE, now)) {
+        newPattern();
       }
     }
 
@@ -472,11 +444,6 @@
     rafId = requestAnimationFrame(renderFrame);
   }
 
-  function newPattern() {
-    seed = (seed + 0x9E3779B9) >>> 0;
-    rebuildPattern();
-  }
-
   async function togglePlay() {
     if (!started) {
       initAudioGraph();
@@ -497,7 +464,7 @@
 
       resetAudioState();
 
-      // Start small, then bloom
+      // Start small
       const w = cols(), h = rows();
       const cx = Math.floor(w / 2);
       const cy = Math.floor(h / 2);
@@ -538,6 +505,5 @@
 
   window.addEventListener('pointerdown', () => togglePlay());
 
-  // Ensure initial sizing
   resize();
 })();
