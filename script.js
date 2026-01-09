@@ -253,10 +253,10 @@
   let rafId = null;
 
   // Drum-ish onset detector (low + mid), tuned to feel “thumpy” without going crazy.
-  const COOLDOWN_MS = 130;
+  const COOLDOWN_MS = 150;
   const EMA_ALPHA = 0.12;
-  const DELTA_K = 0.85;
-  const DELTA_BIAS = 1.25;
+  const DELTA_K = 0.95;
+  const DELTA_BIAS = 2.5;
 
   let prevE = 0;
   let emaD = 0;
@@ -269,7 +269,7 @@
     const src = audioCtx.createMediaElementSource(audioEl);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.35; // less laggy than 0.6, less twitchy than 0.25
+    analyser.smoothingTimeConstant = 0.45; 
 
     src.connect(analyser);
     analyser.connect(audioCtx.destination);
