@@ -4,10 +4,12 @@
   const audioEl = document.getElementById('track');
 
   // ===== Layout tuning =====
+  // 80% grid without blur: use a smaller integer tile size.
   const TILE_BASE = 20;
   const GRID_SCALE = 0.8;
   const TILE = Math.max(10, Math.round(TILE_BASE * GRID_SCALE));
 
+  // Center the tile grid inside the viewport
   let GRID_COLS = 0;
   let GRID_ROWS = 0;
   let GRID_OX = 0;
@@ -19,7 +21,7 @@
   const HALDI  = CSS.getPropertyValue('--haldi').trim()  || '#f2b705';
   const BLACK  = CSS.getPropertyValue('--black').trim()  || '#140f12';
 
-  // --- Minimal tests ---
+  // --- Tiny sanity checks ---
   function assert(cond, msg){ if(!cond) throw new Error(msg); }
   function validateColors(){
     const ok = c => /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c);
@@ -45,6 +47,7 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.imageSmoothingEnabled = false;
     recomputeGrid();
+    rebuildPattern();
   }
 
   function cols() { return GRID_COLS; }
@@ -60,7 +63,7 @@
     ctx.fillRect(GRID_OX + gx * TILE, GRID_OY + gy * TILE, TILE, TILE);
   }
 
-  // 32-bit mixing hash
+  // ===== Pattern generation (perfect symmetry) =====
   function hash2(a, b, seed) {
     a |= 0; b |= 0; seed |= 0;
     let h = seed ^ Math.imul(a, 0x9E3779B1) ^ Math.imul(b, 0x85EBCA6B);
@@ -75,38 +78,12 @@
     return hash2(a, b, seed) / 4294967296;
   }
 
-  function plot8(cx, cy, dx, dy, w, h, color) {
-    const pts = [
-      [ cx + dx, cy + dy], [ cx - dx, cy + dy], [ cx + dx, cy - dy], [ cx - dx, cy - dy],
-      [ cx + dy, cy + dx], [ cx - dy, cy + dx], [ cx + dy, cy - dx], [ cx - dy, cy - dx],
-    ];
-    const seen = new Set();
-    for (const [x,y] of pts) {
-      if (x < 0 || y < 0 || x >= w || y >= h) continue;
-      const key = x + ',' + y;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      drawTile(x, y, color);
-    }
-  }
-
-  const MODES = [
-    'Rosette Dots',
-    'Diamond Dots',
-    'Weave Dots',
-    'Scallop Dots',
-    'Petal Dots'
-  ];
-
-  function pick(arr, seed) {
-    return arr[hash2(seed, seed ^ 0xA3, 0xC0FFEE) % arr.length];
-  }
-
-  function lerp(a,b,t){ return a + (b-a)*t; }
+  const MODES = ['Rosette Dots','Diamond Dots','Weave Dots','Scallop Dots','Petal Dots'];
+  const pick = (arr, seed) => arr[hash2(seed, seed ^ 0xA3, 0xC0FFEE) % arr.length];
+  const lerp = (a,b,t) => a + (b-a)*t;
 
   function generateParams(seed) {
     const mode = pick(MODES, seed);
-
     const u1 = hash01(1, 2, seed);
     const u2 = hash01(3, 4, seed);
     const u3 = hash01(5, 6, seed);
@@ -170,11 +147,56 @@
 
   function dotColor(dx, dy, n, edge, p) {
     if (edge) return BLACK;
-
     const u = hash01(dx, dy, p.seed ^ 0xBADC0DE);
     if (n >= p.tCream) return (u < 0.18 ? HALDI : CREAM);
     if (n >= p.tHaldi) return (u < 0.65 ? HALDI : CREAM);
     return null;
+  }
+
+  // ===== Pattern buffer =====
+  let seed = (Date.now() ^ (Math.random() * 1e9)) >>> 0;
+  let params = generateParams(seed);
+  let gridColors = null; // Uint32 packed, 0 = empty
+
+  function packHex(hex) {
+    const h = hex.replace('#','');
+    const v = parseInt(h.length === 3 ? h.split('').map(c=>c+c).join('') : h, 16);
+    return (v >>> 0);
+  }
+
+  const CREAM_P = packHex(CREAM);
+  const HALDI_P = packHex(HALDI);
+  const BLACK_P = packHex(BLACK);
+
+  function colorToPacked(c) {
+    if (c === CREAM) return CREAM_P;
+    if (c === HALDI) return HALDI_P;
+    if (c === BLACK) return BLACK_P;
+    return packHex(c);
+  }
+
+  function packedToCss(p) {
+    const s = p.toString(16).padStart(6,'0');
+    return '#' + s;
+  }
+
+  function setGrid(x, y, packed) {
+    gridColors[y * cols() + x] = packed;
+  }
+
+  function plot8ToGrid(cx, cy, dx, dy, w, h, packed) {
+    const pts = [
+      [ cx + dx, cy + dy], [ cx - dx, cy + dy], [ cx + dx, cy - dy], [ cx - dx, cy - dy],
+      [ cx + dy, cy + dx], [ cx - dy, cy + dx], [ cx + dy, cy - dx], [ cx - dy, cy - dx],
+    ];
+    const seen = new Set();
+    for (const [x,y] of pts) {
+      if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      const k = x + ',' + y;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      setGrid(x, y, packed);
+    }
   }
 
   function stampPaletteSignature(cx, cy, w, h, p) {
@@ -186,19 +208,21 @@
     const dxH = Math.max(2, s),     dyH = Math.min(dxH, a);
     const dxB = Math.max(2, s + 1), dyB = Math.min(dxB, b);
 
-    plot8(cx, cy, dxC, dyC, w, h, CREAM);
-    plot8(cx, cy, dxH, dyH, w, h, HALDI);
-    plot8(cx, cy, dxB, dyB, w, h, BLACK);
+    plot8ToGrid(cx, cy, dxC, dyC, w, h, CREAM_P);
+    plot8ToGrid(cx, cy, dxH, dyH, w, h, HALDI_P);
+    plot8ToGrid(cx, cy, dxB, dyB, w, h, BLACK_P);
   }
 
-  function renderWithParams(p) {
-    clear();
-
+  function rebuildPattern() {
     const w = cols();
     const h = rows();
+    if (w <= 0 || h <= 0) return;
+
+    params = generateParams(seed);
+    gridColors = new Uint32Array(w * h); // 0 means empty
+
     const cx = Math.floor(w / 2);
     const cy = Math.floor(h / 2);
-
     const maxDx = Math.max(cx, w - 1 - cx);
     const maxDy = Math.max(cy, h - 1 - cy);
     const maxR = Math.sqrt(maxDx*maxDx + maxDy*maxDy) || 1;
@@ -208,50 +232,42 @@
         const r = Math.sqrt(dx*dx + dy*dy);
         const th = Math.atan2(dy, dx + 1e-6);
 
-        const v = fieldValue(p.mode, dx, dy, r, th, p);
+        const v = fieldValue(params.mode, dx, dy, r, th, params);
         const n = 0.5 + 0.5 * Math.tanh(v * 0.95);
+        const edge = Math.abs(Math.sin(v)) < params.edgeWidth;
 
-        const edge = Math.abs(Math.sin(v)) < p.edgeWidth;
-
-        const a = latticeA(dx, dy, p);
-        const b = latticeB(dx, dy, p);
-        const mixGate = hash01(dx, dy, p.seed ^ 0x13579BDF) < p.latticeMix;
+        const a = latticeA(dx, dy, params);
+        const b = latticeB(dx, dy, params);
+        const mixGate = hash01(dx, dy, params.seed ^ 0x13579BDF) < params.latticeMix;
         const onLattice = a || (b && mixGate);
 
-        const edgeGate = ((dx + dy + (p.seed & 7)) % 3) === 0;
+        const edgeGate = ((dx + dy + (params.seed & 7)) % 3) === 0;
         if (!onLattice && !(edge && edgeGate)) continue;
 
-        const color = dotColor(dx, dy, n, edge, p);
-        if (!color) continue;
+        const cssColor = dotColor(dx, dy, n, edge, params);
+        if (!cssColor) continue;
 
         const edgeFade = (r / maxR);
         if (edgeFade > 0.965 && !edge) continue;
 
-        plot8(cx, cy, dx, dy, w, h, color);
+        plot8ToGrid(cx, cy, dx, dy, w, h, colorToPacked(cssColor));
       }
     }
 
-    stampPaletteSignature(cx, cy, w, h, p);
+    stampPaletteSignature(cx, cy, w, h, params);
   }
 
-  // --- Beat detection + audio wiring ---
+  // ===== Audio reactive “bloom” (not beat-based) =====
   let audioCtx = null;
   let analyser = null;
   let freqData = null;
   let started = false;
-  let rafId = null;
 
-  // Calmer onset detector (less sensitive)
-  const COOLDOWN_MS = 190;
-  const EMA_ALPHA = 0.12;
-  const DELTA_K = 1.15;
-  const DELTA_BIAS = 3.0;
-  const MIN_DELTA = 6; // ignore tiny bumps
-
-  let prevE = 0;
-  let emaD = 0;
-  let emvD = 0;
-  let lastBeatAt = 0;
+  // Bloom state
+  let bloomR = 0;
+  let bloomTarget = 0;
+  let fullnessEma = 0;
+  let fullnessMax = 0.08;
 
   function initAudioGraph() {
     if (audioCtx) return;
@@ -259,7 +275,7 @@
     const src = audioCtx.createMediaElementSource(audioEl);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.60;
+    analyser.smoothingTimeConstant = 0.72;
 
     src.connect(analyser);
     analyser.connect(audioCtx.destination);
@@ -267,68 +283,83 @@
     freqData = new Uint8Array(analyser.frequencyBinCount);
   }
 
-  function bassEnergy() {
-    analyser.getByteFrequencyData(freqData);
+  function bandAvg(lo, hi) {
+    lo = Math.max(0, lo);
+    hi = Math.min(freqData.length - 1, hi);
+    if (hi < lo) return 0;
     let sum = 0;
-    const N = Math.min(24, freqData.length);
-    for (let i = 0; i < N; i++) sum += freqData[i];
-    return sum / N; // 0..255
+    const n = hi - lo + 1;
+    for (let i = lo; i <= hi; i++) sum += freqData[i];
+    return sum / n;
   }
 
-  function resetBeatDetector() {
-    prevE = 0;
-    emaD = 0;
-    emvD = 0;
-    lastBeatAt = 0;
+  function computeFullness() {
+    analyser.getByteFrequencyData(freqData);
+
+    // Rough bands (bin indices): low=kicks/bass, mid=body/vocals/snare, high=hats/air
+    const low  = bandAvg(0, 24);
+    const mid  = bandAvg(25, 110);
+    const high = bandAvg(111, 260);
+
+    // Weighted combo, normalized to ~0..1
+    const raw = (0.50 * low + 0.35 * mid + 0.15 * high) / 255;
+
+    // Smooth fullness (avoids jitter)
+    fullnessEma += 0.10 * (raw - fullnessEma);
+
+    // Auto gain control: keep a running max with slow decay so quiet songs still bloom
+    fullnessMax = Math.max(fullnessEma, fullnessMax * 0.995);
+    const norm = Math.min(1, fullnessEma / Math.max(0.06, fullnessMax));
+
+    return norm;
   }
 
-  // --- Generator state ---
-  function validateGenerator(){
-    validateColors();
-    validateAudio();
-    const p = generateParams(123456789);
-    assert(MODES.includes(p.mode), 'generateParams() produced an unknown mode.');
-    assert(p.spacing >= 4 && p.spacing <= 7, 'spacing out of expected range.');
-    assert(p.tCream > p.tHaldi, 'Thresholds must satisfy tCream > tHaldi.');
-    assert(p.latticeMix >= 0 && p.latticeMix <= 1, 'latticeMix out of range.');
-  }
+  let rafId = null;
 
-  let seed = (Date.now() ^ (Math.random() * 1e9)) >>> 0;
-  let params = generateParams(seed);
+  function renderFrame() {
+    clear();
 
-  function render(){
-    params = generateParams(seed);
-    renderWithParams(params);
-  }
-
-  function next(){
-    seed = (seed + 0x9E3779B9) >>> 0;
-    render();
-  }
-
-  function tick() {
-    if (!analyser) return;
-
-    const e = bassEnergy();
-    const d = Math.max(0, e - prevE);
-    prevE = e;
-
-    const diff = d - emaD;
-    emaD += EMA_ALPHA * diff;
-    emvD += EMA_ALPHA * (diff * diff - emvD);
-
-    const std = Math.sqrt(Math.max(0, emvD));
-    const threshold = emaD + DELTA_K * std + DELTA_BIAS;
-
-    const now = performance.now();
-    const canTrigger = (now - lastBeatAt) > COOLDOWN_MS;
-
-    if (canTrigger && d > threshold && d >= MIN_DELTA) {
-      lastBeatAt = now;
-      next();
+    const w = cols();
+    const h = rows();
+    if (!gridColors || w === 0 || h === 0) {
+      rafId = requestAnimationFrame(renderFrame);
+      return;
     }
 
-    rafId = requestAnimationFrame(tick);
+    const cx = Math.floor(w / 2);
+    const cy = Math.floor(h / 2);
+    const maxDx = Math.max(cx, w - 1 - cx);
+    const maxDy = Math.max(cy, h - 1 - cy);
+    const maxR = Math.sqrt(maxDx*maxDx + maxDy*maxDy) || 1;
+
+    if (started && analyser && !audioEl.paused) {
+      const f = computeFullness();
+      const minR = 0.12 * maxR;
+      const maxRR = 1.02 * maxR;
+      bloomTarget = lerp(minR, maxRR, f);
+    }
+
+    // Ease radius (gentle outward/inward motion)
+    bloomR += 0.08 * (bloomTarget - bloomR);
+    const r2 = bloomR * bloomR;
+
+    for (let y = 0; y < h; y++) {
+      const dy = y - cy;
+      for (let x = 0; x < w; x++) {
+        const packed = gridColors[y * w + x];
+        if (packed === 0) continue;
+        const dx = x - cx;
+        if ((dx*dx + dy*dy) > r2) continue;
+        drawTile(x, y, packedToCss(packed));
+      }
+    }
+
+    rafId = requestAnimationFrame(renderFrame);
+  }
+
+  function newPattern() {
+    seed = (seed + 0x9E3779B9) >>> 0;
+    rebuildPattern();
   }
 
   async function togglePlay() {
@@ -349,40 +380,48 @@
         return;
       }
 
-      resetBeatDetector();
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(tick);
+      // Start small, then bloom
+      const w = cols(), h = rows();
+      const cx = Math.floor(w / 2);
+      const cy = Math.floor(h / 2);
+      const maxDx = Math.max(cx, w - 1 - cx);
+      const maxDy = Math.max(cy, h - 1 - cy);
+      const maxR = Math.sqrt(maxDx*maxDx + maxDy*maxDy) || 1;
+
+      fullnessEma = 0;
+      fullnessMax = 0.08;
+      bloomR = 0.10 * maxR;
+      bloomTarget = bloomR;
     } else {
       audioEl.pause();
-      cancelAnimationFrame(rafId);
     }
   }
 
-  // boot
-  resize();
-  validateGenerator();
-  render();
+  // Boot
+  validateColors();
+  validateAudio();
+  recomputeGrid();
+  rebuildPattern();
+  clear();
 
-  window.addEventListener('resize', () => {
-    resize();
-    renderWithParams(params);
-  });
+  cancelAnimationFrame(rafId);
+  rafId = requestAnimationFrame(renderFrame);
+
+  window.addEventListener('resize', () => resize());
 
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
       e.preventDefault();
       togglePlay();
     }
+    // Optional: press N for a new pattern
+    if (e.key && e.key.toLowerCase() === 'n') {
+      newPattern();
+    }
   });
 
   window.addEventListener('pointerdown', () => togglePlay());
 
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      cancelAnimationFrame(rafId);
-    } else if (started && !audioEl.paused) {
-      cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(tick);
-    }
-  });
+  // Ensure initial sizing
+  resize();
 })();
