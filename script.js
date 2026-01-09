@@ -263,10 +263,10 @@
   let started = false;
   let rafId = null;
 
-  const COOLDOWN_MS = 145;
+  const COOLDOWN_MS = 150;
   const EMA_ALPHA = 0.12;
-  const DELTA_K = 0.92;     // lower => more sensitive
-  const DELTA_BIAS = 2.0;   // lower => more sensitive
+  const DELTA_K = 1;     // lower value is more sensitive
+  const DELTA_BIAS = 2.2;   // lower value is more sensitive
 
   let prevE = 0;
   let emaD = 0;   // moving average of delta
