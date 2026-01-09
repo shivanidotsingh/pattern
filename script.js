@@ -3,7 +3,18 @@
   const ctx = canvas.getContext('2d');
   const audioEl = document.getElementById('track');
 
-  const TILE = 20;
+  // ===== Layout tuning =====
+  // "80% grid" without blur: use a smaller integer tile size.
+  // If you want original size, set GRID_SCALE = 1.
+  const TILE_BASE = 20;
+  const GRID_SCALE = 0.8;
+  const TILE = Math.max(10, Math.round(TILE_BASE * GRID_SCALE));
+
+  // Center the tile grid inside the viewport so it never feels cut off on the right/bottom.
+  let GRID_COLS = 0;
+  let GRID_ROWS = 0;
+  let GRID_OX = 0;
+  let GRID_OY = 0;
 
   const CSS = getComputedStyle(document.documentElement);
   const BG     = CSS.getPropertyValue('--bg').trim()     || '#6b0f1a';
@@ -21,6 +32,13 @@
     assert(audioEl instanceof HTMLAudioElement, 'Audio element not found.');
   }
 
+  function recomputeGrid() {
+    GRID_COLS = Math.floor(window.innerWidth / TILE);
+    GRID_ROWS = Math.floor(window.innerHeight / TILE);
+    GRID_OX = Math.floor((window.innerWidth - GRID_COLS * TILE) / 2);
+    GRID_OY = Math.floor((window.innerHeight - GRID_ROWS * TILE) / 2);
+  }
+
   function resize() {
     const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
     canvas.width = Math.floor(window.innerWidth * dpr);
@@ -29,10 +47,11 @@
     canvas.style.height = window.innerHeight + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.imageSmoothingEnabled = false;
+    recomputeGrid();
   }
 
-  function cols() { return Math.floor(window.innerWidth / TILE); }
-  function rows() { return Math.floor(window.innerHeight / TILE); }
+  function cols() { return GRID_COLS; }
+  function rows() { return GRID_ROWS; }
 
   function clear() {
     ctx.fillStyle = BG;
@@ -41,7 +60,7 @@
 
   function drawTile(gx, gy, color) {
     ctx.fillStyle = color;
-    ctx.fillRect(gx * TILE, gy * TILE, TILE, TILE);
+    ctx.fillRect(GRID_OX + gx * TILE, GRID_OY + gy * TILE, TILE, TILE);
   }
 
   // 32-bit mixing hash: deterministic "random" based on (a,b,seed)
@@ -165,15 +184,11 @@
 
   // Decide dot color deterministically from (dx,dy,seed) and field
   function dotColor(dx, dy, n, edge, p) {
-    // black reserved for stitch lines + accents
     if (edge) return BLACK;
 
-    // deterministic "salt" for haldi/cream mix
     const u = hash01(dx, dy, p.seed ^ 0xBADC0DE);
 
-    // in the top band, some dots still go haldi
     if (n >= p.tCream) return (u < 0.18 ? HALDI : CREAM);
-
     if (n >= p.tHaldi) return (u < 0.65 ? HALDI : CREAM);
     return null;
   }
@@ -210,7 +225,6 @@
     const maxDy = Math.max(cy, h - 1 - cy);
     const maxR = Math.sqrt(maxDx*maxDx + maxDy*maxDy) || 1;
 
-    // Iterate only the first octant triangle and stamp out 8-way.
     for (let dx = 0; dx <= Math.max(maxDx, maxDy); dx++) {
       for (let dy = 0; dy <= dx; dy++) {
         const r = Math.sqrt(dx*dx + dy*dy);
@@ -249,11 +263,19 @@
   let started = false;
   let rafId = null;
 
-  // simple adaptive onset detector
-  let ema = 0;            // exponential moving average of energy
-  let emv = 0;            // exponential moving variance (approx)
+  // More sensitive, more regular:
+  // - lower smoothing
+  // - detect onsets using DELTA (energy rise) rather than absolute energy
+  // - shorter cooldown
+  const COOLDOWN_MS = 130;
+  const EMA_ALPHA = 0.12;
+  const DELTA_K = 0.85;     // lower => more sensitive
+  const DELTA_BIAS = 1.5;   // lower => more sensitive
+
+  let prevE = 0;
+  let emaD = 0;   // moving average of delta
+  let emvD = 0;   // moving variance of delta
   let lastBeatAt = 0;
-  const COOLDOWN_MS = 180;
 
   function initAudioGraph() {
     if (audioCtx) return;
@@ -261,7 +283,7 @@
     const src = audioCtx.createMediaElementSource(audioEl);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.6;
+    analyser.smoothingTimeConstant = 0.25;
 
     src.connect(analyser);
     analyser.connect(audioCtx.destination);
@@ -272,11 +294,20 @@
   function bassEnergy() {
     analyser.getByteFrequencyData(freqData);
     let sum = 0;
-    const N = Math.min(15, freqData.length);
+    // slightly wider bass window catches more kicks
+    const N = Math.min(24, freqData.length);
     for (let i = 0; i < N; i++) sum += freqData[i];
     return sum / N; // 0..255
   }
 
+  function resetBeatDetector() {
+    prevE = 0;
+    emaD = 0;
+    emvD = 0;
+    lastBeatAt = 0;
+  }
+
+  // --- Generator state ---
   function validateGenerator(){
     validateColors();
     validateAudio();
@@ -304,19 +335,21 @@
     if (!analyser) return;
 
     const e = bassEnergy();
+    const d = Math.max(0, e - prevE); // onset only
+    prevE = e;
 
-    const a = 0.08;
-    const diff = e - ema;
-    ema += a * diff;
-    emv += a * (diff * diff - emv);
+    // EMA + variance on delta
+    const diff = d - emaD;
+    emaD += EMA_ALPHA * diff;
+    emvD += EMA_ALPHA * (diff * diff - emvD);
 
-    const std = Math.sqrt(Math.max(0, emv));
-    const threshold = ema + 1.15 * std + 6;
+    const std = Math.sqrt(Math.max(0, emvD));
+    const threshold = emaD + DELTA_K * std + DELTA_BIAS;
 
     const now = performance.now();
     const canTrigger = (now - lastBeatAt) > COOLDOWN_MS;
 
-    if (canTrigger && e > threshold && diff > 0) {
+    if (canTrigger && d > threshold) {
       lastBeatAt = now;
       next();
     }
@@ -341,7 +374,8 @@
         console.warn('Audio play blocked:', err);
         return;
       }
-      ema = 0; emv = 0; lastBeatAt = 0;
+
+      resetBeatDetector();
       cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(tick);
     } else {
@@ -360,7 +394,6 @@
     renderWithParams(params);
   });
 
-  // space toggles play/pause
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space') {
       e.preventDefault();
@@ -368,7 +401,6 @@
     }
   });
 
-  // tap/click toggles play/pause
   window.addEventListener('pointerdown', () => togglePlay());
 
   document.addEventListener('visibilitychange', () => {
