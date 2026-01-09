@@ -1,4 +1,4 @@
-  <script>
+
   (() => {
     const canvas = document.getElementById('c');
     const ctx = canvas.getContext('2d');
@@ -307,4 +307,3 @@
     // click/tap still advances (optional)
     window.addEventListener('pointerdown', () => next());
   })();
-  </script>
