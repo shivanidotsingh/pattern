@@ -263,15 +263,13 @@
   let started = false;
   let rafId = null;
 
-  const COOLDOWN_MS = 150;
-  const EMA_ALPHA = 0.12;
-  const DELTA_K = 1;     // lower value is more sensitive
-  const DELTA_BIAS = 2.2;   // lower value is more sensitive
-
-  let prevE = 0;
-  let emaD = 0;   // moving average of delta
-  let emvD = 0;   // moving variance of delta
+  let ema = 0;
+  let emv = 0;
   let lastBeatAt = 0;
+
+  const COOLDOWN_MS = 170;   // original was 180
+  const EMA_ALPHA = 0.08;
+
 
   function initAudioGraph() {
     if (audioCtx) return;
@@ -279,7 +277,7 @@
     const src = audioCtx.createMediaElementSource(audioEl);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.25;
+    analyser.smoothingTimeConstant = 0.6;
 
     src.connect(analyser);
     analyser.connect(audioCtx.destination);
@@ -291,17 +289,17 @@
     analyser.getByteFrequencyData(freqData);
     let sum = 0;
     // slightly wider bass window catches more kicks
-    const N = Math.min(24, freqData.length);
+    const N = Math.min(15, freqData.length);
     for (let i = 0; i < N; i++) sum += freqData[i];
     return sum / N; // 0..255
   }
 
   function resetBeatDetector() {
-    prevE = 0;
-    emaD = 0;
-    emvD = 0;
-    lastBeatAt = 0;
-  }
+  ema = 0;
+  emv = 0;
+  lastBeatAt = 0;
+}
+
 
   // --- Generator state ---
   function validateGenerator(){
@@ -328,30 +326,32 @@
   }
 
   function tick() {
-    if (!analyser) return;
+  if (!analyser) return;
 
-    const e = bassEnergy();
-    const d = Math.max(0, e - prevE); // onset only
-    prevE = e;
+  const e = bassEnergy();
 
-    // EMA + variance on delta
-    const diff = d - emaD;
-    emaD += EMA_ALPHA * diff;
-    emvD += EMA_ALPHA * (diff * diff - emvD);
+  // EMA + variance on energy
+  const diff = e - ema;
+  ema += EMA_ALPHA * diff;
+  emv += EMA_ALPHA * (diff * diff - emv);
 
-    const std = Math.sqrt(Math.max(0, emvD));
-    const threshold = emaD + DELTA_K * std + DELTA_BIAS;
+  const std = Math.sqrt(Math.max(0, emv));
 
-    const now = performance.now();
-    const canTrigger = (now - lastBeatAt) > COOLDOWN_MS;
+  // original was: ema + 1.15*std + 6
+  // tiny sensitivity bump: slightly lower multiplier + bias
+  const threshold = ema + 1.12 * std + 5.5;
 
-    if (canTrigger && d > threshold) {
-      lastBeatAt = now;
-      next();
-    }
+  const now = performance.now();
+  const canTrigger = (now - lastBeatAt) > COOLDOWN_MS;
 
-    rafId = requestAnimationFrame(tick);
+  if (canTrigger && e > threshold && diff > 0) {
+    lastBeatAt = now;
+    next();
   }
+
+  rafId = requestAnimationFrame(tick);
+}
+
 
   async function togglePlay() {
     if (!started) {
