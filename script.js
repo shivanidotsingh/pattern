@@ -267,7 +267,7 @@
   let emv = 0;
   let lastBeatAt = 0;
 
-  const COOLDOWN_MS = 170;   // original was 180
+  const COOLDOWN_MS = 160;  
   const EMA_ALPHA = 0.08;
 
 
