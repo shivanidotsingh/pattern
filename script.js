@@ -289,7 +289,7 @@
     analyser.getByteFrequencyData(freqData);
     let sum = 0;
     // slightly wider bass window catches more kicks
-    const N = Math.min(15, freqData.length);
+    const N = Math.min(18, freqData.length);
     for (let i = 0; i < N; i++) sum += freqData[i];
     return sum / N; // 0..255
   }
