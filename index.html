@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>8-bit Bandhani — Dotty Symmetric Generator</title>
+  <style>
+    :root{
+      --bg:#6b0f1a;        /* maroon/red */
+      --cream:#f3e7d3;     /* cream */
+      --haldi:#f2b705;     /* haldi yellow */
+      --black:#140f12;     /* near-black */
+      --pixel:20;          /* tile size */
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0}
+    body{
+      background:var(--bg);
+      overflow:hidden;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      color:var(--cream);
+    }
+    canvas{
+      display:block;
+      width:100vw;
+      height:100vh;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    /* tiny plain hint text (no box) */
+    .hint{
+      position:fixed;
+      left:10px;
+      bottom:10px;
+      font-size:11px;
+      letter-spacing:0.2px;
+      opacity:0.65;
+      user-select:none;
+      pointer-events:none;
+      text-transform: lowercase;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="hint">hit space for a new pattern</div>
+<script src="script.js" type="text/javascript"></script>
+
+</body>
+</html>
