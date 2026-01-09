@@ -4,12 +4,10 @@
   const audioEl = document.getElementById('track');
 
   // ===== Layout tuning =====
-  // 80% grid without blur: use a smaller integer tile size.
   const TILE_BASE = 20;
   const GRID_SCALE = 0.8;
   const TILE = Math.max(10, Math.round(TILE_BASE * GRID_SCALE));
 
-  // Center the tile grid inside the viewport
   let GRID_COLS = 0;
   let GRID_ROWS = 0;
   let GRID_OX = 0;
@@ -219,7 +217,7 @@
     if (w <= 0 || h <= 0) return;
 
     params = generateParams(seed);
-    gridColors = new Uint32Array(w * h); // 0 means empty
+    gridColors = new Uint32Array(w * h);
 
     const cx = Math.floor(w / 2);
     const cy = Math.floor(h / 2);
@@ -257,7 +255,7 @@
     stampPaletteSignature(cx, cy, w, h, params);
   }
 
-  // ===== Audio reactive “bloom” (not beat-based) =====
+  // ===== Audio (hybrid bloom → beat) =====
   let audioCtx = null;
   let analyser = null;
   let freqData = null;
@@ -268,6 +266,28 @@
   let bloomTarget = 0;
   let fullnessEma = 0;
   let fullnessMax = 0.08;
+
+  // Beat-mode gate (turn on when the track is "full", off when it drops)
+  let beatMode = false;
+  let fullHighSince = 0;
+  let fullLowSince = 0;
+
+  const BEAT_MODE_ON = 0.78;
+  const BEAT_MODE_OFF = 0.55;
+  const BEAT_MODE_ON_MS = 1200;
+  const BEAT_MODE_OFF_MS = 900;
+
+  // Beat detector (moderate, not trigger-happy)
+  let prevBeatE = 0;
+  let emaBeatD = 0;
+  let emvBeatD = 0;
+  let lastBeatAt = 0;
+
+  const BEAT_COOLDOWN_MS = 240;
+  const BEAT_ALPHA = 0.12;
+  const BEAT_K = 1.10;
+  const BEAT_BIAS = 3.2;
+  const BEAT_MIN_DELTA = 7;
 
   function initAudioGraph() {
     if (audioCtx) return;
@@ -293,25 +313,86 @@
     return sum / n;
   }
 
-  function computeFullness() {
+  function analyzeAudio() {
     analyser.getByteFrequencyData(freqData);
 
-    // Rough bands (bin indices): low=kicks/bass, mid=body/vocals/snare, high=hats/air
+    // Fullness bands
     const low  = bandAvg(0, 24);
     const mid  = bandAvg(25, 110);
     const high = bandAvg(111, 260);
 
-    // Weighted combo, normalized to ~0..1
     const raw = (0.50 * low + 0.35 * mid + 0.15 * high) / 255;
-
-    // Smooth fullness (avoids jitter)
     fullnessEma += 0.10 * (raw - fullnessEma);
 
-    // Auto gain control: keep a running max with slow decay so quiet songs still bloom
     fullnessMax = Math.max(fullnessEma, fullnessMax * 0.995);
-    const norm = Math.min(1, fullnessEma / Math.max(0.06, fullnessMax));
+    const f = Math.min(1, fullnessEma / Math.max(0.06, fullnessMax));
 
-    return norm;
+    // Beat energy: kick-ish low + a bit of snare-ish mid
+    const midDrums = bandAvg(25, 90);
+    const beatE = 0.72 * low + 0.28 * midDrums;
+
+    return { f, beatE };
+  }
+
+  function updateBeatMode(f, now) {
+    if (!beatMode) {
+      if (f > BEAT_MODE_ON) {
+        if (!fullHighSince) fullHighSince = now;
+        if (now - fullHighSince > BEAT_MODE_ON_MS) {
+          beatMode = true;
+          fullLowSince = 0;
+        }
+      } else {
+        fullHighSince = 0;
+      }
+    } else {
+      if (f < BEAT_MODE_OFF) {
+        if (!fullLowSince) fullLowSince = now;
+        if (now - fullLowSince > BEAT_MODE_OFF_MS) {
+          beatMode = false;
+          fullHighSince = 0;
+        }
+      } else {
+        fullLowSince = 0;
+      }
+    }
+  }
+
+  function detectBeat(beatE, now) {
+    const d = Math.max(0, beatE - prevBeatE);
+    prevBeatE = beatE;
+
+    const diff = d - emaBeatD;
+    emaBeatD += BEAT_ALPHA * diff;
+    emvBeatD += BEAT_ALPHA * (diff * diff - emvBeatD);
+
+    const std = Math.sqrt(Math.max(0, emvBeatD));
+    const threshold = emaBeatD + BEAT_K * std + BEAT_BIAS;
+
+    if ((now - lastBeatAt) < BEAT_COOLDOWN_MS) return false;
+    if (d < BEAT_MIN_DELTA) return false;
+
+    if (d > threshold) {
+      lastBeatAt = now;
+      return true;
+    }
+    return false;
+  }
+
+  function resetAudioState() {
+    fullnessEma = 0;
+    fullnessMax = 0.08;
+    bloomR = 0;
+    bloomTarget = 0;
+
+    beatMode = false;
+    fullHighSince = 0;
+    fullLowSince = 0;
+
+    prevBeatE = 0;
+    emaBeatD = 0;
+    emvBeatD = 0;
+    lastBeatAt = 0;
   }
 
   let rafId = null;
@@ -333,16 +414,30 @@
     const maxR = Math.sqrt(maxDx*maxDx + maxDy*maxDy) || 1;
 
     if (started && analyser && !audioEl.paused) {
-      const f = computeFullness();
-      const minR = 0.12 * maxR;
-      const maxRR = 1.02 * maxR;
-      bloomTarget = lerp(minR, maxRR, f);
+      const now = performance.now();
+      const { f, beatE } = analyzeAudio();
+
+      updateBeatMode(f, now);
+
+      if (!beatMode) {
+        // Bloom phase: grow/shrink by fullness
+        const minR = 0.12 * maxR;
+        const maxRR = 1.02 * maxR;
+        bloomTarget = lerp(minR, maxRR, f);
+      } else {
+        // Full swing: keep it mostly full-screen and change pattern on beat
+        bloomTarget = maxR * (0.94 + 0.08 * f); // small breathing
+        if (detectBeat(beatE, now)) {
+          newPattern();
+        }
+      }
     }
 
-    // Ease radius (gentle outward/inward motion)
+    // Ease radius
     bloomR += 0.08 * (bloomTarget - bloomR);
     const r2 = bloomR * bloomR;
 
+    // Draw only tiles within radius
     for (let y = 0; y < h; y++) {
       const dy = y - cy;
       for (let x = 0; x < w; x++) {
@@ -380,6 +475,8 @@
         return;
       }
 
+      resetAudioState();
+
       // Start small, then bloom
       const w = cols(), h = rows();
       const cx = Math.floor(w / 2);
@@ -388,8 +485,6 @@
       const maxDy = Math.max(cy, h - 1 - cy);
       const maxR = Math.sqrt(maxDx*maxDx + maxDy*maxDy) || 1;
 
-      fullnessEma = 0;
-      fullnessMax = 0.08;
       bloomR = 0.10 * maxR;
       bloomTarget = bloomR;
     } else {
@@ -400,6 +495,7 @@
   // Boot
   validateColors();
   validateAudio();
+
   recomputeGrid();
   rebuildPattern();
   clear();
