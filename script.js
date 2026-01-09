@@ -4,12 +4,10 @@
   const audioEl = document.getElementById('track');
 
   // ===== Layout tuning =====
-  // 80% grid without blur: use a smaller integer tile size.
   const TILE_BASE = 20;
   const GRID_SCALE = 0.8;
   const TILE = Math.max(10, Math.round(TILE_BASE * GRID_SCALE));
 
-  // Center the tile grid inside the viewport so it never feels cut off.
   let GRID_COLS = 0;
   let GRID_ROWS = 0;
   let GRID_OX = 0;
@@ -21,7 +19,7 @@
   const HALDI  = CSS.getPropertyValue('--haldi').trim()  || '#f2b705';
   const BLACK  = CSS.getPropertyValue('--black').trim()  || '#140f12';
 
-  // --- Minimal tests (fail loudly instead of a blank screen) ---
+  // --- Minimal tests ---
   function assert(cond, msg){ if(!cond) throw new Error(msg); }
   function validateColors(){
     const ok = c => /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(c);
@@ -62,7 +60,7 @@
     ctx.fillRect(GRID_OX + gx * TILE, GRID_OY + gy * TILE, TILE, TILE);
   }
 
-  // 32-bit mixing hash: deterministic "random" based on (a,b,seed)
+  // 32-bit mixing hash
   function hash2(a, b, seed) {
     a |= 0; b |= 0; seed |= 0;
     let h = seed ^ Math.imul(a, 0x9E3779B1) ^ Math.imul(b, 0x85EBCA6B);
@@ -77,7 +75,6 @@
     return hash2(a, b, seed) / 4294967296;
   }
 
-  // Iterate all 8 symmetric positions for a given (dx,dy) around center
   function plot8(cx, cy, dx, dy, w, h, color) {
     const pts = [
       [ cx + dx, cy + dy], [ cx - dx, cy + dy], [ cx + dx, cy - dy], [ cx - dx, cy - dy],
@@ -93,7 +90,6 @@
     }
   }
 
-  // --- Modes (math fields) ---
   const MODES = [
     'Rosette Dots',
     'Diamond Dots',
@@ -126,7 +122,7 @@
     const petals = [6, 8, 10, 12, 14, 16][Math.floor(u5 * 6) % 6];
     const twist  = [0.0, 0.16, 0.28, 0.42, 0.6][Math.floor(u6 * 5) % 5];
 
-    const spacing = 4 + (hash2(21, 22, seed) % 4); // 4,5,6,7
+    const spacing = 4 + (hash2(21, 22, seed) % 4); // 4..7
     const ox1 = hash2(31, 32, seed) % spacing;
     const oy1 = hash2(41, 42, seed) % spacing;
 
@@ -136,10 +132,8 @@
     if (oy2 === oy1) oy2 = (oy2 + 1) % spacing;
 
     const edgeWidth = lerp(0.03, 0.07, hash01(51, 52, seed));
-
     const tHaldi = lerp(0.82, 0.89, hash01(61, 62, seed));
     const tCream = lerp(0.89, 0.94, hash01(71, 72, seed));
-
     const latticeMix = lerp(0.35, 0.70, hash01(81, 82, seed));
 
     return {
@@ -188,14 +182,9 @@
     const a = 1 + (hash2(101, 102, p.seed) % 2);
     const b = 1 + (hash2(103, 104, p.seed) % 2);
 
-    const dxC = Math.max(2, s - 1);
-    const dyC = 0;
-
-    const dxH = Math.max(2, s);
-    const dyH = Math.min(dxH, a);
-
-    const dxB = Math.max(2, s + 1);
-    const dyB = Math.min(dxB, b);
+    const dxC = Math.max(2, s - 1), dyC = 0;
+    const dxH = Math.max(2, s),     dyH = Math.min(dxH, a);
+    const dxB = Math.max(2, s + 1), dyB = Math.min(dxB, b);
 
     plot8(cx, cy, dxC, dyC, w, h, CREAM);
     plot8(cx, cy, dxH, dyH, w, h, HALDI);
@@ -252,11 +241,12 @@
   let started = false;
   let rafId = null;
 
-  // Drum-ish onset detector (low + mid), tuned to feel “thumpy” without going crazy.
-  const COOLDOWN_MS = 150;
+  // Calmer onset detector (less sensitive)
+  const COOLDOWN_MS = 190;
   const EMA_ALPHA = 0.12;
-  const DELTA_K = 0.95;
-  const DELTA_BIAS = 2.5;
+  const DELTA_K = 1.15;
+  const DELTA_BIAS = 3.0;
+  const MIN_DELTA = 6; // ignore tiny bumps
 
   let prevE = 0;
   let emaD = 0;
@@ -269,7 +259,7 @@
     const src = audioCtx.createMediaElementSource(audioEl);
     analyser = audioCtx.createAnalyser();
     analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0.45; 
+    analyser.smoothingTimeConstant = 0.60;
 
     src.connect(analyser);
     analyser.connect(audioCtx.destination);
@@ -277,25 +267,12 @@
     freqData = new Uint8Array(analyser.frequencyBinCount);
   }
 
-  // Weighted “drums” energy: kick-ish lows + snare/clap-ish mids
-  function drumEnergy() {
+  function bassEnergy() {
     analyser.getByteFrequencyData(freqData);
-
-    // Low (kick): bins 0..24
-    let low = 0;
-    const lowEnd = Math.min(24, freqData.length - 1);
-    for (let i = 0; i <= lowEnd; i++) low += freqData[i];
-    low /= (lowEnd + 1);
-
-    // Mid (snare/clap): bins 25..90
-    let mid = 0;
-    const midStart = Math.min(25, freqData.length - 1);
-    const midEnd = Math.min(90, freqData.length - 1);
-    const midCount = Math.max(1, (midEnd - midStart + 1));
-    for (let i = midStart; i <= midEnd; i++) mid += freqData[i];
-    mid /= midCount;
-
-    return 0.68 * low + 0.32 * mid;
+    let sum = 0;
+    const N = Math.min(24, freqData.length);
+    for (let i = 0; i < N; i++) sum += freqData[i];
+    return sum / N; // 0..255
   }
 
   function resetBeatDetector() {
@@ -303,35 +280,6 @@
     emaD = 0;
     emvD = 0;
     lastBeatAt = 0;
-  }
-
-  function tick() {
-    if (!analyser) return;
-
-    const e = drumEnergy();
-    const d = Math.max(0, e - prevE); // onset only
-    prevE = e;
-
-    const diff = d - emaD;
-    emaD += EMA_ALPHA * diff;
-    emvD += EMA_ALPHA * (diff * diff - emvD);
-
-    const std = Math.sqrt(Math.max(0, emvD));
-    const threshold = emaD + DELTA_K * std + DELTA_BIAS;
-
-    const now = performance.now();
-    const canTrigger = (now - lastBeatAt) > COOLDOWN_MS;
-
-    // soft catch: if we’ve gone too long without a hit, allow a weaker onset
-    const gap = now - lastBeatAt;
-    const softCatch = (gap > 650) && (d > threshold * 0.65);
-
-    if (canTrigger && (d > threshold || softCatch)) {
-      lastBeatAt = now;
-      next();
-    }
-
-    rafId = requestAnimationFrame(tick);
   }
 
   // --- Generator state ---
@@ -356,6 +304,31 @@
   function next(){
     seed = (seed + 0x9E3779B9) >>> 0;
     render();
+  }
+
+  function tick() {
+    if (!analyser) return;
+
+    const e = bassEnergy();
+    const d = Math.max(0, e - prevE);
+    prevE = e;
+
+    const diff = d - emaD;
+    emaD += EMA_ALPHA * diff;
+    emvD += EMA_ALPHA * (diff * diff - emvD);
+
+    const std = Math.sqrt(Math.max(0, emvD));
+    const threshold = emaD + DELTA_K * std + DELTA_BIAS;
+
+    const now = performance.now();
+    const canTrigger = (now - lastBeatAt) > COOLDOWN_MS;
+
+    if (canTrigger && d > threshold && d >= MIN_DELTA) {
+      lastBeatAt = now;
+      next();
+    }
+
+    rafId = requestAnimationFrame(tick);
   }
 
   async function togglePlay() {
