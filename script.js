@@ -261,13 +261,17 @@
   let freqData = null;
   let started = false;
 
-  // Bloom state
+  // Bloom/radius state
   let bloomR = 0;
   let bloomTarget = 0;
-  let fullnessEma = 0;
-  let fullnessMax = 0.08;
 
-  // Beat-mode gate (turn on when the track is "full", off when it drops)
+  // Separate “gate” vs “visual” fullness so drops shrink radius properly
+  let gateEma = 0;
+  let vizEma = 0;
+  let gateMax = 0.08; // slow decay = stable mode switching
+  let vizMax  = 0.08; // fast decay = responsive drops
+
+  // Beat-mode gate
   let beatMode = false;
   let fullHighSince = 0;
   let fullLowSince = 0;
@@ -277,7 +281,7 @@
   const BEAT_MODE_ON_MS = 1200;
   const BEAT_MODE_OFF_MS = 900;
 
-  // Beat detector (moderate, not trigger-happy)
+  // Beat detector (moderate)
   let prevBeatE = 0;
   let emaBeatD = 0;
   let emvBeatD = 0;
@@ -313,6 +317,8 @@
     return sum / n;
   }
 
+  function clamp01(x){ return Math.max(0, Math.min(1, x)); }
+
   function analyzeAudio() {
     analyser.getByteFrequencyData(freqData);
 
@@ -321,22 +327,33 @@
     const mid  = bandAvg(25, 110);
     const high = bandAvg(111, 260);
 
-    const raw = (0.50 * low + 0.35 * mid + 0.15 * high) / 255;
-    fullnessEma += 0.10 * (raw - fullnessEma);
+    // Gate uses low+mid+high (decides “full swing”)
+    const rawGate = (0.50 * low + 0.35 * mid + 0.15 * high) / 255;
 
-    fullnessMax = Math.max(fullnessEma, fullnessMax * 0.995);
-    const f = Math.min(1, fullnessEma / Math.max(0.06, fullnessMax));
+    // Visual uses mostly low+mid (so hats don’t keep radius huge during drops)
+    const rawViz  = (0.65 * low + 0.35 * mid) / 255;
+
+    // Smooth both
+    gateEma += 0.08 * (rawGate - gateEma);
+    vizEma  += 0.10 * (rawViz  - vizEma);
+
+    // Normalize with different decay rates
+    gateMax = Math.max(gateEma, gateMax * 0.995); // slow
+    vizMax  = Math.max(vizEma,  vizMax  * 0.975); // faster → drops shrink
+
+    const fGate = clamp01(gateEma / Math.max(0.06, gateMax));
+    const fViz  = clamp01(vizEma  / Math.max(0.06, vizMax));
 
     // Beat energy: kick-ish low + a bit of snare-ish mid
     const midDrums = bandAvg(25, 90);
     const beatE = 0.72 * low + 0.28 * midDrums;
 
-    return { f, beatE };
+    return { fGate, fViz, beatE };
   }
 
-  function updateBeatMode(f, now) {
+  function updateBeatMode(fGate, now) {
     if (!beatMode) {
-      if (f > BEAT_MODE_ON) {
+      if (fGate > BEAT_MODE_ON) {
         if (!fullHighSince) fullHighSince = now;
         if (now - fullHighSince > BEAT_MODE_ON_MS) {
           beatMode = true;
@@ -346,7 +363,7 @@
         fullHighSince = 0;
       }
     } else {
-      if (f < BEAT_MODE_OFF) {
+      if (fGate < BEAT_MODE_OFF) {
         if (!fullLowSince) fullLowSince = now;
         if (now - fullLowSince > BEAT_MODE_OFF_MS) {
           beatMode = false;
@@ -380,10 +397,13 @@
   }
 
   function resetAudioState() {
-    fullnessEma = 0;
-    fullnessMax = 0.08;
     bloomR = 0;
     bloomTarget = 0;
+
+    gateEma = 0;
+    vizEma = 0;
+    gateMax = 0.08;
+    vizMax = 0.08;
 
     beatMode = false;
     fullHighSince = 0;
@@ -415,18 +435,18 @@
 
     if (started && analyser && !audioEl.paused) {
       const now = performance.now();
-      const { f, beatE } = analyzeAudio();
+      const { fGate, fViz, beatE } = analyzeAudio();
 
-      updateBeatMode(f, now);
+      updateBeatMode(fGate, now);
 
       if (!beatMode) {
-        // Bloom phase: grow/shrink by fullness
+        // Bloom phase: radius follows music fullness (visual)
         const minR = 0.12 * maxR;
         const maxRR = 1.02 * maxR;
-        bloomTarget = lerp(minR, maxRR, f);
+        bloomTarget = lerp(minR, maxRR, fViz);
       } else {
-        // Full swing: keep it mostly full-screen and change pattern on beat
-        bloomTarget = maxR * (0.94 + 0.08 * f); // small breathing
+        // Full swing: still allow drops to shrink radius, and change on beats
+        bloomTarget = maxR * (0.88 + 0.14 * fViz); // stronger drop range
         if (detectBeat(beatE, now)) {
           newPattern();
         }
